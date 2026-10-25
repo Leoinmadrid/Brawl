@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>Arena de esquiva</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #fff;
+      font-family: Arial, sans-serif;
+    }
+
+    #arena {
+      position: fixed;
+      inset: 4px 8px 8px;
+      overflow: hidden;
+      border: 2px solid #111;
+      background: #fff;
+    }
+
+    #effects {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #lives {
+      position: absolute;
+      z-index: 2;
+      top: 10px;
+      left: 50%;
+      display: flex;
+      gap: 10px;
+      transform: translateX(-50%);
+      color: #e53935;
+      font: 30px/1 Georgia, serif;
+      user-select: none;
+    }
+
+    #lives .lost { color: #dedede; }
+
+    #attack-label {
+      position: absolute;
+      z-index: 2;
+      top: 52px;
+      left: 50%;
+      max-width: calc(100% - 24px);
+      color: #444;
+      font-size: 12px;
+      text-align: center;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }
+
+    #player {
+      position: absolute;
+      z-index: 1;
+      width: 18px;
+      height: 18px;
+      border: 1px solid #000;
+      border-radius: 50%;
+      background: #050505;
+      transform: translate(-50%, -50%);
+      will-change: left, top;
+    }
+
+    #player.invulnerable { opacity: 0.35; }
+
+    #joystick {
+      position: absolute;
+      z-index: 2;
+      bottom: 18px;
+      left: 18px;
+      display: none;
+      width: 116px;
+      height: 116px;
+      border: 2px solid #222;
+      border-radius: 50%;
+      background: #ffffffc9;
+      touch-action: none;
+      user-select: none;
+    }
+
+    #joystick.active { background: #f0f0f0e8; }
+
+    #stick {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 44px;
+      height: 44px;
+      border: 2px solid #111;
+      border-radius: 50%;
+      background: #111;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    #game-over {
+      position: absolute;
+      z-index: 3;
+      inset: 0;
+      display: grid;
+      align-content: center;
+      justify-items: center;
+      gap: 14px;
+      background: #ffffffed;
+      color: #111;
+    }
+
+    #game-over[hidden] { display: none; }
+    #game-over strong { font-size: clamp(24px, 6vw, 42px); }
+
+    #restart {
+      padding: 9px 15px;
+      border: 1px solid #111;
+      border-radius: 0;
+      background: #fff;
+      color: #111;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    #restart:hover, #restart:focus-visible { background: #111; color: #fff; }
+
+    @media (max-width: 500px) {
+      #attack-label { top: 48px; font-size: 11px; }
+      #lives { font-size: 27px; }
+    }
+
+    @media (max-width: 700px), (pointer: coarse) {
+      #joystick { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <main id="arena" aria-label="Arena. Esquiva los ataques con WASD">
+    <canvas id="effects" aria-hidden="true"></canvas>
+    <div id="lives" role="img" aria-label="3 vidas" aria-live="polite">
+      <span aria-hidden="true">♥</span>
+      <span aria-hidden="true">♥</span>
+      <span aria-hidden="true">♥</span>
+    </div>
+    <div id="attack-label" aria-live="polite">Prepárate</div>
+    <div id="player" aria-label="Jugador"></div>
+    <div id="joystick" role="application" aria-label="Joystick táctil para mover">
+      <div id="stick"></div>
+    </div>
+    <div id="game-over" hidden>
+      <strong>Fin de la partida</strong>
+      <button id="restart" type="button">Volver a jugar</button>
+    </div>
+  </main>
+
+  <script>
+    const arena = document.querySelector('#arena');
+    const canvas = document.querySelector('#effects');
+    const context = canvas.getContext('2d');
+    const playerElement = document.querySelector('#player');
+    const livesElement = document.querySelector('#lives');
+    const attackLabel = document.querySelector('#attack-label');
+    const joystick = document.querySelector('#joystick');
+    const stick = document.querySelector('#stick');
+    const gameOver = document.querySelector('#game-over');
+    const pressed = new Set();
+    const joystickDirection = { x: 0, y: 0 };
+    const player = { x: 0, y: 0 };
+    const bullets = [];
+    const bears = [];
+    const explosions = [];
+    const playerRadius = 9;
+    const speed = 280;
+    let lives = 3;
+    let previousTime = 0;
+    let attackNumber = 0;
+    let nextAttackAt = 1100;
+    let pendingAttack = null;
+    let invulnerableUntil = 0;
+    let gameEnded = false;
+    let joystickPointer = null;
+
+    function arenaSize() {
+      return { width: arena.clientWidth, height: arena.clientHeight };
+    }
+
+    function resizeCanvas() {
+      const size = arenaSize();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(size.width * ratio);
+      canvas.height = Math.round(size.height * ratio);
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    }
+
+    function centerPlayer() {
+      const size = arenaSize();
+      player.x = size.width / 2;
+      player.y = size.height / 2;
+      playerElement.style.left = `${player.x}px`;
+      playerElement.style.top = `${player.y}px`;
+      resizeCanvas();
+    }
+
+    function updateJoystick(event) {
+      const rect = joystick.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const maxTravel = rect.width * 0.3;
+      let dx = event.clientX - centerX;
+      let dy = event.clientY - centerY;
+      const distance = Math.hypot(dx, dy);
+      if (distance > maxTravel) {
+        dx = dx / distance * maxTravel;
+        dy = dy / distance * maxTravel;
+      }
+      joystickDirection.x = dx / maxTravel;
+      joystickDirection.y = dy / maxTravel;
+      stick.style.left = `calc(50% + ${dx}px)`;
+      stick.style.top = `calc(50% + ${dy}px)`;
+    }
+
+    function releaseJoystick() {
+      joystickPointer = null;
+      joystickDirection.x = 0;
+      joystickDirection.y = 0;
+      stick.style.left = '50%';
+      stick.style.top = '50%';
+      joystick.classList.remove('active');
+    }
+
+    joystick.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      joystickPointer = event.pointerId;
+      joystick.setPointerCapture(event.pointerId);
+      joystick.classList.add('active');
+      updateJoystick(event);
+    });
+    joystick.addEventListener('pointermove', (event) => {
+      if (event.pointerId === joystickPointer) updateJoystick(event);
+    });
+    joystick.addEventListener('pointerup', (event) => {
+      if (event.pointerId === joystickPointer) releaseJoystick();
+    });
+    joystick.addEventListener('pointercancel', releaseJoystick);
+    joystick.addEventListener('lostpointercapture', releaseJoystick);
+
+    function edgePosition(size) {
+      const edge = Math.floor(Math.random() * 4);
+      if (edge === 0) return { x: Math.random() * size.width, y: 0 };
+      if (edge === 1) return { x: size.width, y: Math.random() * size.height };
+      if (edge === 2) return { x: Math.random() * size.width, y: size.height };
+      return { x: 0, y: Math.random() * size.height };
+    }
+
+    function announceAttack(now) {
+      const cycle = Math.floor(attackNumber / 10);
+      const position = attackNumber % 10;
+      const brawlers = ['Shelly', 'Colt', 'Nita', 'Poco', 'Brock'];
+      const name = brawlers[position % brawlers.length];
+      const special = position >= brawlers.length;
+      const origin = edgePosition(arenaSize());
+      const direction = Math.atan2(player.y - origin.y, player.x - origin.x);
+      pendingAttack = { name, special, cycle, origin, direction, target: { x: player.x, y: player.y }, fireAt: now + 430 };
+      attackLabel.textContent = `${name} · ${special ? 'Súper' : 'Ataque básico'}`;
+      attackNumber++;
+    }
+
+    function addBullet(origin, angle, velocity, radius, color, kind = 'orb', spawnAt = 0) {
+      bullets.push({
+        x: origin.x,
+        y: origin.y,
+        vx: Math.cos(angle) * velocity,
+        vy: Math.sin(angle) * velocity,
+        radius,
+        color,
+        kind,
+        spawnAt
+      });
+    }
+
+    function fireAttack(attack, now) {
+      const scale = 1 + attack.cycle * 0.1;
+      const extra = Math.min(attack.cycle, 5);
+
+      if (attack.name === 'Shelly') {
+        const count = (attack.special ? 11 : 7) + extra;
+        const spread = attack.special ? 1.06 : 1.2;
+        const velocity = (attack.special ? 350 : 305) * scale;
+        for (let index = 0; index < count; index++) {
+          const angle = attack.direction + (index / (count - 1) - 0.5) * spread;
+          addBullet(attack.origin, angle, velocity, attack.special ? 7 : 6, '#e9434f');
+        }
+      } else if (attack.name === 'Colt') {
+        const count = attack.special ? 12 + extra : 6;
+        const velocity = (attack.special ? 455 : 370) * scale;
+        const spread = attack.special ? 0.16 : 0.08;
+        const interval = attack.special ? 42 : 55;
+        for (let index = 0; index < count; index++) {
+          const angle = attack.direction + (index / (count - 1) - 0.5) * spread;
+          addBullet(attack.origin, angle, velocity, 4.5, '#3767e8', 'colt', now + index * interval);
+        }
+      } else if (attack.name === 'Poco') {
+        const count = attack.special ? 5 : 3;
+        const spread = attack.special ? 0.86 : 0.62;
+        const velocity = (attack.special ? 345 : 310) * scale;
+        for (let index = 0; index < count; index++) {
+          const angle = attack.direction + (index / (count - 1) - 0.5) * spread;
+          addBullet(attack.origin, angle, velocity, attack.special ? 11 : 9, '#36a86b', 'note');
+        }
+      } else if (attack.name === 'Brock') {
+        const count = attack.special ? 7 + extra : 1;
+        const spread = attack.special ? 0.95 : 0;
+        for (let index = 0; index < count; index++) {
+          const angle = attack.direction + (count === 1 ? 0 : (index / (count - 1) - 0.5) * spread);
+          const target = attack.special ? {
+            x: Math.max(35, Math.min(arenaSize().width - 35, attack.target.x + (index - (count - 1) / 2) * 32)),
+            y: Math.max(75, Math.min(arenaSize().height - 35, attack.target.y + (index % 2 ? 22 : -22)))
+          } : attack.target;
+          const rocketOrigin = attack.special ? edgePosition(arenaSize()) : attack.origin;
+          const rocketAngle = Math.atan2(target.y - rocketOrigin.y, target.x - rocketOrigin.x);
+          addBullet(rocketOrigin, rocketAngle, (attack.special ? 420 : 325) * scale, 8, '#ed772d', 'rocket', now);
+          bullets[bullets.length - 1].explosionRadius = attack.special ? 42 : 34;
+          bullets[bullets.length - 1].expiresAt = now + (attack.special ? 1250 : 1800);
+        }
+      } else if (attack.special) {
+        bears.push({ x: attack.origin.x, y: attack.origin.y, expiresAt: now + 7000, speed: 170 * scale });
+      } else {
+        addBullet(attack.origin, attack.direction, 270 * scale, 10, '#202020', 'nita');
+      }
+
+      pendingAttack = null;
+      nextAttackAt = now + Math.max(590, 1020 - Math.floor(attackNumber / 10) * 90);
+    }
+
+    function updateLives() {
+      [...livesElement.children].forEach((heart, index) => {
+        heart.classList.toggle('lost', index >= lives);
+      });
+      livesElement.setAttribute('aria-label', `${lives} ${lives === 1 ? 'vida' : 'vidas'}`);
+    }
+
+    function hitPlayer(now) {
+      if (now < invulnerableUntil || gameEnded) return;
+      lives--;
+      invulnerableUntil = now + 850;
+      playerElement.classList.add('invulnerable');
+      window.setTimeout(() => {
+        if (performance.now() >= invulnerableUntil) playerElement.classList.remove('invulnerable');
+      }, 900);
+      updateLives();
+      if (lives === 0) {
+        gameEnded = true;
+        pressed.clear();
+        gameOver.hidden = false;
+      }
+    }
+
+    function drawWarning() {
+      if (!pendingAttack) return;
+      context.save();
+      context.strokeStyle = '#e9434f';
+      context.globalAlpha = 0.46;
+      context.lineWidth = 2;
+      context.setLineDash([7, 7]);
+      context.beginPath();
+      context.moveTo(pendingAttack.origin.x, pendingAttack.origin.y);
+      context.lineTo(pendingAttack.target.x, pendingAttack.target.y);
+      context.stroke();
+      context.restore();
+    }
+
+    function drawBullet(bullet) {
+      if (bullet.kind === 'colt') {
+        context.save();
+        context.translate(bullet.x, bullet.y);
+        context.rotate(Math.atan2(bullet.vy, bullet.vx));
+        context.fillStyle = bullet.color;
+        context.beginPath();
+        context.ellipse(0, 0, 10, 3.5, 0, 0, Math.PI * 2);
+        context.fill();
+        context.restore();
+        return;
+      }
+
+      if (bullet.kind === 'rocket') {
+        context.save();
+        context.translate(bullet.x, bullet.y);
+        context.rotate(Math.atan2(bullet.vy, bullet.vx));
+        context.fillStyle = '#ed772d';
+        context.beginPath();
+        context.ellipse(0, 0, 11, 5, 0, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = '#f2c35a';
+        context.beginPath();
+        context.moveTo(-10, 0);
+        context.lineTo(-17, -4);
+        context.lineTo(-15, 0);
+        context.lineTo(-17, 4);
+        context.closePath();
+        context.fill();
+        context.restore();
+        return;
+      }
+
+      if (bullet.kind === 'note') {
+        context.save();
+        context.translate(bullet.x, bullet.y);
+        context.rotate(Math.atan2(bullet.vy, bullet.vx));
+        context.fillStyle = bullet.color;
+        context.beginPath();
+        context.ellipse(0, 0, bullet.radius * 1.35, bullet.radius * 0.68, 0, 0, Math.PI * 2);
+        context.fill();
+        context.fillRect(bullet.radius * 0.65, -bullet.radius * 1.6, 3, bullet.radius * 1.8);
+        context.restore();
+        return;
+      }
+
+      context.beginPath();
+      context.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
+      context.fillStyle = bullet.color;
+      context.fill();
+      if (bullet.kind === 'bear') {
+        context.beginPath();
+        context.arc(bullet.x - 3, bullet.y - 3, 2, 0, Math.PI * 2);
+        context.arc(bullet.x + 3, bullet.y - 3, 2, 0, Math.PI * 2);
+        context.fillStyle = '#fff';
+        context.fill();
+      } else {
+        context.beginPath();
+        context.arc(bullet.x - bullet.radius * 0.25, bullet.y - bullet.radius * 0.25, Math.max(1.5, bullet.radius * 0.22), 0, Math.PI * 2);
+        context.fillStyle = '#ffffffa8';
+        context.fill();
+      }
+    }
+
+    function drawBear(bear) {
+      const radius = 15;
+      context.fillStyle = '#795548';
+      context.beginPath();
+      context.arc(bear.x - 9, bear.y - 10, 7, 0, Math.PI * 2);
+      context.arc(bear.x + 9, bear.y - 10, 7, 0, Math.PI * 2);
+      context.arc(bear.x, bear.y, radius, 0, Math.PI * 2);
+      context.fill();
+      context.fillStyle = '#f0cfaa';
+      context.beginPath();
+      context.ellipse(bear.x, bear.y + 5, 8, 6, 0, 0, Math.PI * 2);
+      context.fill();
+      context.fillStyle = '#171717';
+      context.beginPath();
+      context.arc(bear.x - 5, bear.y - 2, 1.7, 0, Math.PI * 2);
+      context.arc(bear.x + 5, bear.y - 2, 1.7, 0, Math.PI * 2);
+      context.arc(bear.x, bear.y + 4, 2, 0, Math.PI * 2);
+      context.fill();
+    }
+
+    function updateBears(now, elapsed) {
+      for (let index = bears.length - 1; index >= 0; index--) {
+        const bear = bears[index];
+        if (now >= bear.expiresAt) {
+          bears.splice(index, 1);
+          continue;
+        }
+        const dx = player.x - bear.x;
+        const dy = player.y - bear.y;
+        const distance = Math.hypot(dx, dy) || 1;
+        bear.x += dx / distance * bear.speed * elapsed;
+        bear.y += dy / distance * bear.speed * elapsed;
+        if (distance < playerRadius + 13) hitPlayer(now);
+        drawBear(bear);
+      }
+    }
+
+    function updateBullets(now, elapsed) {
+      const size = arenaSize();
+      for (let index = bullets.length - 1; index >= 0; index--) {
+        const bullet = bullets[index];
+        if (now < bullet.spawnAt) continue;
+        bullet.x += bullet.vx * elapsed;
+        bullet.y += bullet.vy * elapsed;
+        const collides = Math.hypot(bullet.x - player.x, bullet.y - player.y) < bullet.radius + playerRadius;
+        if (bullet.kind === 'rocket') {
+          const outside = bullet.x < 0 || bullet.x > size.width || bullet.y < 0 || bullet.y > size.height;
+          if (collides || outside || now >= bullet.expiresAt) {
+            explosions.push({ x: bullet.x, y: bullet.y, radius: bullet.explosionRadius, expiresAt: now + 420 });
+            bullets.splice(index, 1);
+            continue;
+          }
+        } else if (collides) {
+          hitPlayer(now);
+        }
+        drawBullet(bullet);
+
+        if (bullet.x < -bullet.radius || bullet.x > size.width + bullet.radius || bullet.y < -bullet.radius || bullet.y > size.height + bullet.radius) {
+          bullets.splice(index, 1);
+        }
+      }
+    }
+
+    function updateExplosions(now) {
+      for (let index = explosions.length - 1; index >= 0; index--) {
+        const explosion = explosions[index];
+        if (now >= explosion.expiresAt) {
+          explosions.splice(index, 1);
+          continue;
+        }
+        if (Math.hypot(explosion.x - player.x, explosion.y - player.y) < explosion.radius + playerRadius) hitPlayer(now);
+        const progress = 1 - (explosion.expiresAt - now) / 420;
+        context.beginPath();
+        context.arc(explosion.x, explosion.y, explosion.radius * (0.72 + progress * 0.28), 0, Math.PI * 2);
+        context.fillStyle = `rgba(239, 119, 45, ${0.3 * (1 - progress)})`;
+        context.fill();
+        context.strokeStyle = '#ed772d';
+        context.lineWidth = 2;
+        context.stroke();
+      }
+    }
+
+    function frame(time) {
+      const elapsed = previousTime ? Math.min((time - previousTime) / 1000, 0.05) : 0;
+      previousTime = time;
+      const size = arenaSize();
+      context.clearRect(0, 0, size.width, size.height);
+
+      if (!gameEnded) {
+        const horizontal = Number(pressed.has('d')) - Number(pressed.has('a')) + joystickDirection.x;
+        const vertical = Number(pressed.has('s')) - Number(pressed.has('w')) + joystickDirection.y;
+        const magnitude = Math.hypot(horizontal, vertical) || 1;
+        player.x = Math.max(playerRadius, Math.min(size.width - playerRadius, player.x + horizontal / magnitude * speed * elapsed));
+        player.y = Math.max(playerRadius, Math.min(size.height - playerRadius, player.y + vertical / magnitude * speed * elapsed));
+        playerElement.style.left = `${player.x}px`;
+        playerElement.style.top = `${player.y}px`;
+
+        if (!pendingAttack && time >= nextAttackAt) announceAttack(time);
+        if (pendingAttack && time >= pendingAttack.fireAt) fireAttack(pendingAttack, time);
+      }
+
+      drawWarning();
+      updateBullets(time, elapsed);
+      updateExplosions(time);
+      updateBears(time, elapsed);
+      requestAnimationFrame(frame);
+    }
+
+    function restart() {
+      lives = 3;
+      bullets.length = 0;
+      bears.length = 0;
+      explosions.length = 0;
+      attackNumber = 0;
+      nextAttackAt = 850;
+      pendingAttack = null;
+      invulnerableUntil = 0;
+      gameEnded = false;
+      attackLabel.textContent = 'Prepárate';
+      playerElement.classList.remove('invulnerable');
+      gameOver.hidden = true;
+      updateLives();
+      centerPlayer();
+      arena.focus();
+    }
+
+    window.addEventListener('keydown', (event) => {
+      const key = event.key.toLowerCase();
+      if (!['w', 'a', 's', 'd'].includes(key)) return;
+      event.preventDefault();
+      pressed.add(key);
+    });
+    window.addEventListener('keyup', (event) => pressed.delete(event.key.toLowerCase()));
+    window.addEventListener('blur', () => pressed.clear());
+    window.addEventListener('resize', centerPlayer);
+    document.querySelector('#restart').addEventListener('click', restart);
+
+    centerPlayer();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
